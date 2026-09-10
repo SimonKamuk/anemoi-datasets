@@ -35,6 +35,7 @@ class XarraySourceBase(Source):
     options: dict[str, Any] | None = None
     flavour: dict[str, Any] | None = None
     patch: dict[str, Any] | None = None
+    preload: bool | int | str = False
 
     path_or_url: str | None = None
 
@@ -88,6 +89,7 @@ class XarraySourceBase(Source):
             options=self.options,
             flavour=self.flavour,
             patch=self.patch,
+            preload=self.preload,
             **self.kwargs,
         )
 
@@ -120,6 +122,7 @@ class XarraySourceBase(Source):
             options=self.options,
             flavour=self.flavour,
             patch=self.patch,
+            preload=self.preload,
             **self.kwargs,
         )
 

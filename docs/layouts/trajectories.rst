@@ -155,9 +155,12 @@ coordinate, so drop it at open time with Xarray's own
    Reading one field at a time is very inefficient when the source store
    is chunked with many time steps per chunk, because the whole chunk is
    decompressed to extract a single time slice. Check the chunking of the
-   store before building a large dataset, and consider rechunking it
-   along the time axis; see :ref:`create-incremental` for splitting the
-   build across processes.
+   store before building a large dataset, and see
+   :ref:`xarray-preload` for reading a whole window at once instead.
+   Note that ``build.group_by`` defaults to ``1`` for this layout, which
+   leaves a preloaded window nothing to amortise beyond the steps of a
+   single trajectory: raise it to cover several base dates. See
+   :ref:`create-incremental` for splitting the build across processes.
 
 Forecast accumulations
 ======================

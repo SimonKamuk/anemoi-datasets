@@ -169,6 +169,33 @@ class Time(ABC):
             "this dataset cannot be used with the 'trajectories' layout."
         )
 
+    def preload_window(self, first: datetime.datetime, last: datetime.datetime) -> dict[str, slice]:
+        """Return the slice of the datetime axis covering ``[first, last]``.
+
+        Used to load a whole window of the time axis into memory in one read,
+        instead of reading each field on its own.  A store chunked with many
+        time steps per chunk has to decompress a whole chunk to yield a single
+        time slice, so reading fields one at a time re-reads the same chunk
+        once per field.
+
+        The keys are the dataset's own coordinate *names*, so the result can be
+        passed straight to ``xarray.Dataset.sel``.  An empty dict means there
+        is nothing to preload (a constant field has no time axis).
+
+        Parameters
+        ----------
+        first : datetime.datetime
+            Earliest datetime the caller will ask for.
+        last : datetime.datetime
+            Latest datetime the caller will ask for.
+
+        Returns
+        -------
+        dict of str to slice
+            The window to select, keyed by coordinate name.
+        """
+        return {}
+
 
 class Constant(Time):
     """Represents a constant time."""
@@ -284,6 +311,23 @@ class Analysis(Time):
         """
         return {self.time_coordinate_name: valid_time}
 
+    def preload_window(self, first: datetime.datetime, last: datetime.datetime) -> dict[str, slice]:
+        """Return the validity-time window to preload.
+
+        Parameters
+        ----------
+        first : datetime.datetime
+            Earliest datetime the caller will ask for.
+        last : datetime.datetime
+            Latest datetime the caller will ask for.
+
+        Returns
+        -------
+        dict of str to slice
+            The window on the time coordinate.
+        """
+        return {self.time_coordinate_name: slice(first, last)}
+
 
 class ForecastFromValidTimeAndStep(Time):
     """Represents a forecast time derived from valid time and step."""
@@ -380,6 +424,26 @@ class ForecastFromValidTimeAndStep(Time):
             self.step_coordinate_name: _step_selection(valid_time - basetime),
         }
 
+    def preload_window(self, first: datetime.datetime, last: datetime.datetime) -> dict[str, slice]:
+        """Return the validity-time window to preload.
+
+        The step axis is left whole: it is short, and every step of a window is
+        wanted anyway.
+
+        Parameters
+        ----------
+        first : datetime.datetime
+            Earliest datetime the caller will ask for.
+        last : datetime.datetime
+            Latest datetime the caller will ask for.
+
+        Returns
+        -------
+        dict of str to slice
+            The window on the time coordinate.
+        """
+        return {self.time_coordinate_name: slice(first, last)}
+
 
 class ForecastFromValidTimeAndBaseTime(Time):
     """Represents a forecast time derived from valid time and base time."""
@@ -461,6 +525,23 @@ class ForecastFromValidTimeAndBaseTime(Time):
             self.time_coordinate_name: valid_time,
         }
 
+    def preload_window(self, first: datetime.datetime, last: datetime.datetime) -> dict[str, slice]:
+        """Return the validity-time window to preload.
+
+        Parameters
+        ----------
+        first : datetime.datetime
+            Earliest datetime the caller will ask for.
+        last : datetime.datetime
+            Latest datetime the caller will ask for.
+
+        Returns
+        -------
+        dict of str to slice
+            The window on the time coordinate.
+        """
+        return {self.time_coordinate_name: slice(first, last)}
+
 
 class ForecastFromBaseTimeAndDate(Time):
     """Represents a forecast time derived from base time and date."""
@@ -541,3 +622,24 @@ class ForecastFromBaseTimeAndDate(Time):
             self.date_coordinate_name: basetime,
             self.step_coordinate_name: _step_selection(valid_time - basetime),
         }
+
+    def preload_window(self, first: datetime.datetime, last: datetime.datetime) -> dict[str, slice]:
+        """Return the run-time window to preload.
+
+        This store is indexed by run time, not validity time, so the window is
+        taken on the date coordinate.  Callers pass a range that spans the
+        basetimes they will ask for.  The step axis is left whole.
+
+        Parameters
+        ----------
+        first : datetime.datetime
+            Earliest datetime the caller will ask for.
+        last : datetime.datetime
+            Latest datetime the caller will ask for.
+
+        Returns
+        -------
+        dict of str to slice
+            The window on the date coordinate.
+        """
+        return {self.date_coordinate_name: slice(first, last)}
