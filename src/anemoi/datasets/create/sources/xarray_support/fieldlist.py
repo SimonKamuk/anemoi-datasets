@@ -24,6 +24,8 @@ from .variable import FilteredVariable
 from .variable import Variable
 
 if TYPE_CHECKING:
+    import datetime
+
     import xarray as xr
 
 LOG = logging.getLogger(__name__)
@@ -197,17 +199,65 @@ class XarrayFieldList(FieldList):
         FieldList
             The new FieldList with selected fields.
         """
+        return self._select(lambda variable: {}, **kwargs)
 
+    def sel_forecast(
+        self,
+        valid_time: "datetime.datetime",
+        basetime: "datetime.datetime",
+        **kwargs: Any,
+    ) -> FieldList:
+        """Select the fields valid at *valid_time* in the run started at *basetime*.
+
+        This is the ``trajectories`` counterpart of :meth:`sel`: instead of a
+        single validity time it takes a ``(valid_time, basetime)`` pair, which
+        is what identifies a forecast field uniquely (the same validity time is
+        reachable from several runs).  Each variable is asked, through its own
+        :class:`~anemoi.datasets.create.sources.xarray_support.time.Time`, how
+        to turn that pair into a selection on its own coordinates, so a single
+        dataset may mix analysis, forecast and constant variables.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted fields.
+        basetime : datetime.datetime
+            The model-run time the wanted fields must come from.
+        kwargs : dict
+            Further selection criteria (``param``, ``level``, ...), as in :meth:`sel`.
+
+        Returns
+        -------
+        FieldList
+            The new FieldList with the selected fields.
         """
-        The algorithm is as follows:
-        1 - Use the kwargs to select the variables that match the selection (`param` or `variable`)
-        2 - For each variable, use the remaining kwargs to select the coordinates (`level`, `number`, ...)
-        3 - Some mars like keys, like `date`, `time`, `step` are not found in the coordinates,
-            but added to the metadata of the selected fields. A example is `step` that is added to the
-            metadata of the field. Step 2 may return a variable that contain all the fields that
-            verify at the same `valid_datetime`, with different base `date` and `time` and a different `step`.
-            So we get an extra chance to filter the fields by the metadata.
+        return self._select(lambda variable: variable.time.forecast_selection(valid_time, basetime), **kwargs)
+
+    def _select(self, extra_selection: Any, **kwargs: Any) -> FieldList:
+        """Select fields, adding a per-variable selection on top of ``kwargs``.
+
+        Parameters
+        ----------
+        extra_selection : Callable
+            Called with each matching variable; returns a dict of additional
+            selection criteria for that variable, or ``None`` to drop it.
+        kwargs : dict
+            The selection criteria common to every variable.
+
+        Returns
+        -------
+        FieldList
+            The new FieldList with selected fields.
         """
+
+        # The algorithm is as follows:
+        # 1 - Use the kwargs to select the variables that match the selection (`param` or `variable`)
+        # 2 - For each variable, use the remaining kwargs to select the coordinates (`level`, `number`, ...)
+        # 3 - Some mars like keys, like `date`, `time`, `step` are not found in the coordinates,
+        #     but added to the metadata of the selected fields. A example is `step` that is added to the
+        #     metadata of the field. Step 2 may return a variable that contain all the fields that
+        #     verify at the same `valid_datetime`, with different base `date` and `time` and a different `step`.
+        #     So we get an extra chance to filter the fields by the metadata.
 
         variables: list[Variable] = []
         count: int = 0
@@ -223,6 +273,15 @@ class XarrayFieldList(FieldList):
             if match:
                 count += 1
                 missing: dict[str, Any] = {}
+
+                # Ask the caller for the selection that is specific to this
+                # variable (empty for sel(); the (valid_time, basetime) mapping
+                # for sel_forecast()). None means this variable cannot serve the
+                # request and is skipped.
+                extra = extra_selection(v)
+                if extra is None:
+                    continue
+                rest = {**rest, **extra}
 
                 # Select from the variable's coordinates (time, level, number, ....)
                 # This may return a new variable with a isel() slice of the selection

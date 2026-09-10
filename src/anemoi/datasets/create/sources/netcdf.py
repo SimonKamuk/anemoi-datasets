@@ -15,6 +15,7 @@ import earthkit.data as ekd
 from . import source_registry
 from .legacy import LegacySource
 from .xarray import load_many
+from .xarray import load_many_forecast
 
 
 @source_registry.register("netcdf")
@@ -43,3 +44,33 @@ class NetCDFSource(LegacySource):
             The loaded data.
         """
         return load_many("📁", context, dates, path, *args, **kwargs)
+
+    @staticmethod
+    def _execute_forecast(
+        context: Any,
+        items: list[tuple[Any, Any]],
+        path: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> ekd.FieldList:
+        """Load forecast ``(valid_time, basetime)`` pairs for the ``trajectories`` layout.
+
+        Parameters
+        ----------
+        context : Any
+            The context in which the function is executed.
+        items : list
+            The ``(valid_time, basetime)`` pairs for which data is to be loaded.
+        path : str
+            The NetCDF files to load from.
+        *args : tuple
+            Additional positional arguments.
+        **kwargs : dict
+            Additional keyword arguments.
+
+        Returns
+        -------
+        ekd.FieldList
+            The loaded data.
+        """
+        return load_many_forecast("📁", context, items, path, *args, **kwargs)

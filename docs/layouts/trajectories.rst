@@ -79,11 +79,85 @@ can be used at the leaves of a trajectory recipe. Today this means:
    support.
 -  :ref:`accumulate <sources-accumulate>` — forecast accumulations via
    the ``accumulation: from-zero | from-previous-step`` flag; see below.
+-  the Xarray-backed sources — ``xarray-zarr``, ``xarray``, ``netcdf``,
+   ``opendap``, ``xarray-kerchunk`` and ``planetary-computer``; see
+   :ref:`Xarray datasets in a trajectory recipe
+   <trajectories-xarray>` below.
 
 ``grib-index``, ``fdb``, ``hindcasts`` and ``recentre`` are not
 trajectory-aware in this release. ``from-trajectories:`` is the reverse
 bridge: it lets a regular :ref:`gridded <layouts-gridded>` recipe pull
 fields from a forecast archive; see :ref:`sources-from-trajectories`.
+
+.. _trajectories-xarray:
+
+Xarray datasets in a trajectory recipe
+======================================
+
+An Xarray dataset can feed a trajectory recipe as long as its time
+coordinates identify a field by *model run* and *lead time*, rather than
+by validity time alone — otherwise a validity time would be ambiguous,
+since the same one is reached from several runs (``12Z`` is both
+``00Z + 12h`` and ``06Z + 6h``).
+
+Point the ``date`` and ``step`` :ref:`flavour <create-cf-data>` rules at
+the run-time and lead-time coordinates. With CF-style forecast files,
+these are typically the coordinates whose ``standard_name`` is
+``forecast_reference_time`` and ``forecast_period``:
+
+.. code:: yaml
+
+   base_dates: {start: 2021-01-01, end: 2021-01-03, frequency: 12h}
+   steps:      {start: 1, end: 6, frequency: 1h}
+
+   input:
+     xarray-zarr:
+       url: /path/to/forecasts.zarr
+       flavour:
+         rules:
+           latitude: {name: lat}
+           longitude: {name: lon}
+           date: {name: analysis_time}      # the model run
+           step: {name: forecast_duration}  # the lead time
+
+   output:
+     layout: trajectories
+
+Three further points are worth knowing.
+
+**Constant fields.** A variable with no time dimension — a land-sea mask,
+surface geopotential — is valid for every ``(base date, step)`` pair and
+is broadcast over all of them automatically. ``repeated_dates`` is not
+needed, and is in any case not trajectory-aware.
+
+**Analysis-indexed stores.** A store indexed by validity time only can
+also be used: for each requested pair it supplies the field valid at
+``base date + step``. This covers two useful cases — taking step 0 of a
+trajectory from an analysis (combine the two stores with ``concat:`` and
+a ``steps:`` filter on each branch), and reading a forecast archive that
+has been flattened onto a validity-time axis by the
+``analysis_lead_to_valid_time`` patch, which is one way to supply a step
+the forecast files themselves do not hold.
+
+**Redundant validity-time coordinates.** Forecast files often carry a
+two-dimensional ``valid_time(run, lead_time)`` coordinate. It is
+redundant, and the coordinate guesser does not handle a 2-D time
+coordinate, so drop it at open time with Xarray's own
+``drop_variables``:
+
+.. code:: yaml
+
+   options:
+     drop_variables: [valid_time]
+
+.. warning::
+
+   Reading one field at a time is very inefficient when the source store
+   is chunked with many time steps per chunk, because the whole chunk is
+   decompressed to extract a single time slice. Check the chunking of the
+   store before building a large dataset, and consider rechunking it
+   along the time axis; see :ref:`create-incremental` for splitting the
+   build across processes.
 
 Forecast accumulations
 ======================

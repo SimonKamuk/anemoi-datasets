@@ -14,12 +14,34 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Any
 
+import numpy as np
 from anemoi.utils.dates import as_datetime
 
 from .coordinates import Coordinate
 from .variable import Variable
 
 LOG = logging.getLogger(__name__)
+
+
+def _step_selection(step: datetime.timedelta) -> np.timedelta64:
+    """Convert a forecast step to a value that selects on a step coordinate.
+
+    Step coordinates hold ``numpy.timedelta64`` values, which compare against
+    neither ``int`` hours nor :class:`datetime.timedelta` (the latter raises a
+    ``TypeError`` inside ``numpy.searchsorted``), so the step has to be handed
+    over as a ``numpy.timedelta64``.
+
+    Parameters
+    ----------
+    step : datetime.timedelta
+        The forecast step.
+
+    Returns
+    -------
+    numpy.timedelta64
+        The step as a second-resolution ``numpy.timedelta64``.
+    """
+    return np.timedelta64(int(step.total_seconds()), "s")
 
 
 class Time(ABC):
@@ -111,6 +133,42 @@ class Time(ABC):
 
         pass
 
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Return the coordinate selection isolating one forecast field.
+
+        Maps a ``(valid_time, basetime)`` pair -- as requested by the
+        ``trajectories`` layout -- onto a selection keyed by this dataset's own
+        coordinate *names*, so that
+        :meth:`~anemoi.datasets.create.sources.xarray_support.variable.Variable.sel`
+        can slice the coordinates directly.  Selecting on the MARS-style
+        ``date``/``step`` aliases instead would fall through to
+        :class:`~anemoi.datasets.create.sources.xarray_support.variable.FilteredVariable`,
+        which scans every field of the variable.
+
+        A ``(valid_time, basetime)`` pair is used rather than a bare validity
+        time because the two do not determine each other: in a forecast archive
+        the same validity time is reached from several runs (e.g. ``12Z`` is
+        both ``00Z + 12h`` and ``06Z + 6h``), so a validity time alone selects
+        more than one field.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field.
+        basetime : datetime.datetime
+            The model-run time the wanted field must come from.
+
+        Returns
+        -------
+        dict of str to Any, or None
+            Keyword arguments for ``sel``, or ``None`` if this time
+            representation cannot serve the requested pair.
+        """
+        raise NotImplementedError(
+            f"'{type(self).__name__}' does not implement forecast_selection; "
+            "this dataset cannot be used with the 'trajectories' layout."
+        )
+
 
 class Constant(Time):
     """Represents a constant time."""
@@ -136,6 +194,23 @@ class Constant(Time):
             The variable to select the datetime for.
         """
         return None
+
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Return an empty selection: a constant field serves every forecast pair.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field (unused).
+        basetime : datetime.datetime
+            The model-run time (unused).
+
+        Returns
+        -------
+        dict of str to Any
+            An empty dict -- the single field is valid for any pair.
+        """
+        return {}
 
 
 class Analysis(Time):
@@ -188,6 +263,26 @@ class Analysis(Time):
             The name of the time coordinate.
         """
         return self.time_coordinate_name
+
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Select the analysis valid at *valid_time*.
+
+        An analysis carries no step axis, so the run it belongs to is its own
+        validity time and *basetime* does not narrow the selection further.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field.
+        basetime : datetime.datetime
+            The model-run time (unused).
+
+        Returns
+        -------
+        dict of str to Any
+            Selection on the time coordinate.
+        """
+        return {self.time_coordinate_name: valid_time}
 
 
 class ForecastFromValidTimeAndStep(Time):
@@ -265,6 +360,26 @@ class ForecastFromValidTimeAndStep(Time):
         """
         return self.time_coordinate_name
 
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Select on validity time and step.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field.
+        basetime : datetime.datetime
+            The model-run time the wanted field must come from.
+
+        Returns
+        -------
+        dict of str to Any
+            Selection on the time and step coordinates.
+        """
+        return {
+            self.time_coordinate_name: valid_time,
+            self.step_coordinate_name: _step_selection(valid_time - basetime),
+        }
+
 
 class ForecastFromValidTimeAndBaseTime(Time):
     """Represents a forecast time derived from valid time and base time."""
@@ -326,6 +441,26 @@ class ForecastFromValidTimeAndBaseTime(Time):
         """
         return self.time_coordinate_name
 
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Select on base time and validity time.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field.
+        basetime : datetime.datetime
+            The model-run time the wanted field must come from.
+
+        Returns
+        -------
+        dict of str to Any
+            Selection on the date and time coordinates.
+        """
+        return {
+            self.date_coordinate_name: basetime,
+            self.time_coordinate_name: valid_time,
+        }
+
 
 class ForecastFromBaseTimeAndDate(Time):
     """Represents a forecast time derived from base time and date."""
@@ -386,3 +521,23 @@ class ForecastFromBaseTimeAndDate(Time):
             The name of the time coordinate.
         """
         raise NotImplementedError("ForecastFromBaseTimeAndDate.select_valid_datetime")
+
+    def forecast_selection(self, valid_time: datetime.datetime, basetime: datetime.datetime) -> dict[str, Any] | None:
+        """Select on base time and step.
+
+        Parameters
+        ----------
+        valid_time : datetime.datetime
+            The validity time of the wanted field.
+        basetime : datetime.datetime
+            The model-run time the wanted field must come from.
+
+        Returns
+        -------
+        dict of str to Any
+            Selection on the date and step coordinates.
+        """
+        return {
+            self.date_coordinate_name: basetime,
+            self.step_coordinate_name: _step_selection(valid_time - basetime),
+        }

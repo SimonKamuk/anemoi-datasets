@@ -44,3 +44,27 @@ class LegacySource(Source):
 
     def execute_valid_dates(self, dates: Any) -> Any:
         return self._execute(self.context, dates, *self.args, **self.kwargs)
+
+    def execute_forecast_dates(self, dates: Any) -> Any:
+        """Handle a ``ForecastDates`` request via the optional ``_execute_forecast`` hook.
+
+        Legacy sources declare trajectory support by defining a static
+        ``_execute_forecast(context, items, ...)``, mirroring ``_execute`` but
+        receiving ``(valid_time, basetime)`` pairs instead of dates.  Sources
+        that do not define it fall back to the base class, which raises the
+        standard "does not support the trajectory layout" error.
+
+        Parameters
+        ----------
+        dates : ForecastDates
+            The forecast-date argument from the pipeline.
+
+        Returns
+        -------
+        Any
+            The loaded data.
+        """
+        execute_forecast = getattr(self, "_execute_forecast", None)
+        if execute_forecast is None:
+            return super().execute_forecast_dates(dates)
+        return execute_forecast(self.context, dates.items, *self.args, **self.kwargs)

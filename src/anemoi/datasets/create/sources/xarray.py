@@ -7,6 +7,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+from typing import TYPE_CHECKING
 from typing import Any
 
 import earthkit.data as ekd
@@ -16,9 +17,14 @@ from anemoi.datasets.create.types import DateList
 from ..source import Source
 from .xarray_support import XarrayFieldList
 from .xarray_support import load_many
+from .xarray_support import load_many_forecast
 from .xarray_support import load_one
+from .xarray_support import load_one_forecast
 
-__all__ = ["load_many", "load_one", "XarrayFieldList"]
+if TYPE_CHECKING:
+    from anemoi.datasets.create.arguments import ForecastDates
+
+__all__ = ["load_many", "load_many_forecast", "load_one", "load_one_forecast", "XarrayFieldList"]
 
 
 class XarraySourceBase(Source):
@@ -78,6 +84,38 @@ class XarraySourceBase(Source):
             self.emoji,
             self.context,
             dates,
+            pattern=self.path_or_url,
+            options=self.options,
+            flavour=self.flavour,
+            patch=self.patch,
+            **self.kwargs,
+        )
+
+    def execute_forecast_dates(self, dates: "ForecastDates") -> ekd.FieldList:
+        """Execute the data loading process for forecast ``(valid_time, basetime)`` pairs.
+
+        This is what makes an Xarray dataset usable under the ``trajectories``
+        layout.  It requires the dataset's time coordinates to be recognised as
+        a forecast -- typically by pointing the ``date`` and ``step`` flavour
+        rules at the run-time and lead-time coordinates -- so that each field
+        can be identified by its model run and step rather than by validity
+        time alone.
+
+        Parameters
+        ----------
+        dates : ForecastDates
+            The ``(valid_time, basetime)`` pairs for which data needs to be loaded.
+
+        Returns
+        -------
+        ekd.FieldList
+            The loaded data fields.
+        """
+
+        return load_many_forecast(
+            self.emoji,
+            self.context,
+            dates.items,
             pattern=self.path_or_url,
             options=self.options,
             flavour=self.flavour,
