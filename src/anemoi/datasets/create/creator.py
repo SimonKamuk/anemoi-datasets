@@ -239,6 +239,15 @@ class Creator(ABC):
             # There are several groups. There is one result to load for each group.
             self.load_result(result, dataset)
 
+            # Release the group's data before building the next one. Python
+            # rebinds `result` only after the next `select()` has returned, so
+            # without this the previous group stays alive while the next one is
+            # read, doubling peak memory. That is harmless while a result is a
+            # handful of lazy field handles, but not when a source preloads its
+            # window into memory (see the xarray `preload` option), where it is
+            # the difference between fitting in RAM and being killed.
+            result = None
+
             # Notify sub-class
             self.load_done(dataset, i)
 
