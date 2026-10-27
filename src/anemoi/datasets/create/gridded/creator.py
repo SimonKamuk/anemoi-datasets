@@ -34,7 +34,35 @@ from .context import SimpleGriddedContext
 LOG = logging.getLogger(__name__)
 
 
+def group_lengths(axis_values: list, groups: list[list]) -> list[int]:
+    """Return the length each group covers along axis 0 of the data array.
+
+    The data array has a row for every value of ``axis_values``, including the
+    missing dates, but the groups do not contain the missing dates. So that the
+    groups tile the array, each group is extended back to the end of the
+    previous one, and the last group to the end of the array.
+    """
+    index = {v: i for i, v in enumerate(axis_values)}
+    lengths = []
+    start = 0
+    for values in groups:
+        end = max(index[v] for v in values) + 1
+        lengths.append(end - start)
+        start = end
+    lengths[-1] += len(axis_values) - start
+    return lengths
+
+
 class GriddedCreator(Creator):
+
+    def group_shapes(self) -> list[tuple[int, ...]]:
+        """Return the shape of each group's footprint in the data array.
+
+        Missing dates have a row in the array, so they are counted in the
+        group that covers them (see :func:`group_lengths`).
+        """
+        lengths = group_lengths(self.groups.provider.values, [g.dates for g in self.groups])
+        return [(n,) for n in lengths]
 
     def _metadata_dates(self):
         """Return the datetime values used for statistics metadata.

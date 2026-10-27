@@ -26,6 +26,7 @@ from anemoi.datasets.dates.groups import TrajectoryGroups
 
 from ..dataset import Dataset
 from ..gridded.creator import GriddedCreator
+from ..gridded.creator import group_lengths
 from ..statistics import TrajectoryStatisticsCollector
 from .context import TrajectoryGriddedContext
 
@@ -376,14 +377,14 @@ class TrajectoryGriddedCreator(GriddedCreator):
         """Return the shape of each group's footprint in the data array.
 
         Each entry is ``(n_base_dates, n_steps)``.  The first element is
-        used by ``group_to_range`` to index axis 0.
+        used by ``group_to_range`` to index axis 0; missing base dates have a
+        row in the array, so they are counted in the group that covers them
+        (see :func:`group_lengths`).
         """
-        shapes = []
-        for g in self.groups:
-            n_base_dates = len(set(bt for _, bt in g))
-            n_steps = len(set(vt - bt for vt, bt in g)) if len(g) > 0 else 0
-            shapes.append((n_base_dates, n_steps))
-        return shapes
+        groups = list(self.groups)
+        base_dates, _ = self.groups.provider.factorise()
+        lengths = group_lengths(base_dates, [sorted(set(bt for _, bt in g)) for g in groups])
+        return [(n, len(set(vt - bt for vt, bt in g))) for n, g in zip(lengths, groups)]
 
     def _tendencies_to_compute(self, dataset: Dataset) -> dict[str, int]:
         """Return ``{name: step_delta}`` for the tendencies to compute.

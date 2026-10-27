@@ -191,6 +191,31 @@ class TestTrajectoryGroupsMissing:
             for _, basetime in group.items:
                 assert basetime != datetime.datetime(2024, 1, 2)
 
+    @pytest.mark.parametrize(
+        "missing, expected",
+        [
+            ([], [(2, 2), (2, 2)]),
+            (["2024-01-01"], [(2, 2), (2, 2)]),
+            # A missing row goes to the group after it...
+            (["2024-01-02"], [(1, 2), (3, 2)]),
+            (["2024-01-03"], [(2, 2), (2, 2)]),
+            # ...or to the last group, at the end of the array.
+            (["2024-01-04"], [(2, 2), (2, 2)]),
+            (["2024-01-03", "2024-01-04"], [(4, 2)]),
+        ],
+    )
+    def test_group_shapes_cover_missing_rows(self, missing, expected):
+        """The group shapes tile the whole array, missing rows included.
+
+        Otherwise ``group_to_range`` points at the wrong rows and finalise
+        fails with "Statistics end ... does not match dataset length".
+        """
+        from anemoi.datasets.create.trajectories.creator import TrajectoryGriddedCreator
+
+        creator = TrajectoryGriddedCreator.__new__(TrajectoryGriddedCreator)
+        creator.__dict__["groups"] = self._make(missing=missing, group_by=2)
+        assert creator.group_shapes() == expected
+
 
 # ---------------------------------------------------------------------------
 # Read side: TrajectoriesZarrWithMissingDates
