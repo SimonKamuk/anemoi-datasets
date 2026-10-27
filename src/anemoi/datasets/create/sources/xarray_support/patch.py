@@ -12,7 +12,10 @@ import logging
 from typing import Any
 from typing import Literal
 
+import numpy as np
+import pandas as pd
 import xarray as xr
+from earthkit.meteo.solar import cos_solar_zenith_angle
 
 LOG = logging.getLogger(__name__)
 
@@ -224,7 +227,10 @@ def patch_rolling_operation(
         - 'vars' : list[str]
             List of variable names to apply the rolling operation to.
         - 'operation' : str
-            The operation to apply ('sum', 'mean', 'min', 'max', 'std', etc.).
+            The operation to apply ('sum', 'mean', 'min', 'max', 'std', etc.),
+            or 'last' for the latest value in the window that is not missing.
+            'last' does not need all periods: the first windows look back only
+            as far as the data goes.
 
     Returns
     -------
@@ -254,8 +260,209 @@ def patch_rolling_operation(
     operation = vars_operation_config["operation"]
 
     for var in vars:
+        if operation == "last":
+            ds[var] = _rolling_last(ds[var], dim, steps)
+            continue
         rolling = ds[var].rolling(dim={dim: steps}, min_periods=steps)
         ds[var] = getattr(rolling, operation)()
+
+    return ds
+
+
+def _rolling_last(variable: xr.DataArray, dim: str, steps: int) -> xr.DataArray:
+    """The latest value that is not missing in each rolling window.
+
+    Unlike the other rolling operations, a window does not need all its
+    periods: steps before the start of the dimension count as missing, so the
+    first windows look back as far as there is data.
+
+    Each chunk is filled with ``steps - 1`` values of overlap from the chunk
+    before, rather than with ``ffill``, so that it stays local along ``dim``:
+    a lazily loaded window of the dataset then only reads the chunks it
+    overlaps, instead of scanning from the start of the dimension.
+    """
+    axis = variable.get_axis_num(dim)
+
+    def last(block: np.ndarray) -> np.ndarray:
+        block = np.moveaxis(block, axis, 0)
+        result = block.copy()
+        for shift in range(1, min(steps, len(block))):
+            missing = np.isnan(result[shift:])
+            result[shift:][missing] = block[:-shift][missing]
+        return np.moveaxis(result, 0, axis)
+
+    data = variable.data
+    if hasattr(data, "map_overlap"):
+        data = data.map_overlap(last, depth={axis: (steps - 1, 0)}, boundary="none", dtype=data.dtype)
+    else:
+        data = last(np.asarray(data))
+    return variable.copy(data=data)
+
+
+def patch_vector_magnitude(ds: xr.Dataset, magnitudes: dict[str, list[str]]) -> xr.Dataset:
+    """Add the magnitude of vectors given by their components.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The dataset to patch.
+    magnitudes : dict[str, list[str]]
+        Mapping from the name of each new variable to the names of the
+        components it is the magnitude of. The new variable takes the
+        ``units`` and ``grid_mapping`` of the first component.
+
+    Returns
+    -------
+    xr.Dataset
+        The patched dataset, with the components kept.
+
+    Examples
+    --------
+    >>> patch_vector_magnitude(ds, {"10fg": ["ugst10m", "vgst10m"]})
+    """
+    for name, components in magnitudes.items():
+        first = ds[components[0]]
+        magnitude = sum(ds[component] ** 2 for component in components) ** 0.5
+        magnitude.attrs = {key: first.attrs[key] for key in ("units", "grid_mapping") if key in first.attrs}
+        ds[name] = magnitude
+
+    return ds
+
+
+def patch_valid_range(
+    ds: xr.Dataset, config: dict[Literal["vars", "minimum", "maximum"], float | list[str]]
+) -> xr.Dataset:
+    """Set values outside a valid range to missing (NaN).
+
+    For fields with isolated values that cannot be right, such as a negative
+    albedo. It runs before ``rolling_operation``, so a rolling ``last`` can
+    then fill them with the latest valid value.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The dataset to patch.
+    config : dict
+        The options:
+
+        - ``vars``: the variables to mask.
+        - ``minimum``, ``maximum``: the bounds of the valid range, inclusive.
+          At least one is needed.
+
+    Returns
+    -------
+    xr.Dataset
+        The patched dataset.
+
+    Examples
+    --------
+    >>> patch_valid_range(ds, {"vars": ["al"], "minimum": 0})
+    """
+    unknown = set(config) - {"vars", "minimum", "maximum"}
+    assert not unknown, f"Unknown valid_range options {sorted(unknown)}"
+    minimum, maximum = config.get("minimum"), config.get("maximum")
+    assert minimum is not None or maximum is not None, "valid_range needs a minimum or a maximum"
+
+    for name in config["vars"]:
+        variable = ds[name]
+        valid = True
+        if minimum is not None:
+            valid = valid & (variable >= minimum)
+        if maximum is not None:
+            valid = valid & (variable <= maximum)
+        masked = variable.where(valid)
+        masked.attrs = variable.attrs
+        ds[name] = masked
+
+    return ds
+
+
+def patch_mask_night(
+    ds: xr.Dataset,
+    config: dict[
+        Literal["vars", "time", "latitude", "longitude", "min_cos_solar_zenith_angle"], str | float | list[str]
+    ],
+) -> xr.Dataset:
+    """Set variables to missing (NaN) where the sun is below the horizon.
+
+    For fields that are only defined in daylight, such as an albedo. The cosine
+    of the solar zenith angle is the one the ``cos_solar_zenith_angle`` forcing
+    uses, evaluated at each value of the time coordinate. It is computed lazily,
+    chunk by chunk, so only the times that are read are evaluated.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The dataset to patch.
+    config : dict
+        The options:
+
+        - ``vars``: the variables to mask.
+        - ``time``: the one-dimensional time coordinate to evaluate the sun
+          at, by default ``time``.
+        - ``latitude``, ``longitude``: the latitude and longitude
+          coordinates, by default ``latitude`` and ``longitude``.
+        - ``min_cos_solar_zenith_angle``: values are kept where the cosine of
+          the solar zenith angle exceeds this, by default 0 (the sun above the
+          horizon).
+
+    Returns
+    -------
+    xr.Dataset
+        The patched dataset.
+
+    Examples
+    --------
+    >>> patch_mask_night(ds, {
+    ...     'vars': ['albedo'],
+    ...     'latitude': 'lat',
+    ...     'longitude': 'lon',
+    ...     'min_cos_solar_zenith_angle': 0.02,
+    ... })
+    """
+    unknown = set(config) - {"vars", "time", "latitude", "longitude", "min_cos_solar_zenith_angle"}
+    assert not unknown, f"Unknown mask_night options {sorted(unknown)}"
+
+    time = ds[config.get("time", "time")]
+    latitude = ds[config.get("latitude", "latitude")]
+    longitude = ds[config.get("longitude", "longitude")]
+    threshold = config.get("min_cos_solar_zenith_angle", 0.0)
+
+    assert time.ndim == 1, f"mask_night needs a one-dimensional time coordinate, got {time.dims}"
+
+    def cos_sza(times, lat, lon):
+        # A block is (time, *grid), time first as it is the first argument
+        # below; evaluate each of its times on its part of the grid.
+        shape = np.broadcast_shapes(times.shape, lat.shape, lon.shape)
+        dates = pd.to_datetime(np.broadcast_to(times, shape)[(slice(None),) + (0,) * (len(shape) - 1)])
+        lat, lon = np.broadcast_to(lat, shape)[0], np.broadcast_to(lon, shape)[0]
+        result = np.empty(shape, dtype=np.float32)
+        for i, date in enumerate(dates.to_pydatetime()):
+            result[i] = cos_solar_zenith_angle(date, lat, lon)
+        return result
+
+    for name in config["vars"]:
+        variable = ds[name]
+        chunks = variable.chunksizes
+
+        def chunked(coordinate: xr.DataArray) -> xr.DataArray:
+            # A plain array, as a dimension coordinate cannot be chunked, and
+            # chunked like the variable, so each block of the result lines up
+            # with a block of the data it masks.
+            array = xr.DataArray(coordinate.values, dims=coordinate.dims)
+            return array.chunk({dim: chunks.get(dim, 1 if dim == time.dims[0] else -1) for dim in array.dims})
+
+        cos = xr.apply_ufunc(
+            cos_sza,
+            chunked(time),
+            chunked(latitude),
+            chunked(longitude),
+            dask="parallelized",
+            output_dtypes=[np.float32],
+        )
+        masked = variable.where(cos > threshold)
+        masked.attrs = variable.attrs
+        ds[name] = masked
 
     return ds
 
@@ -266,6 +473,9 @@ PATCHES = {
     "rename": patch_rename,
     "sort_coordinates": patch_sort_coordinate,
     "analysis_lead_to_valid_time": patch_analysis_lead_to_valid_time,
+    "vector_magnitude": patch_vector_magnitude,
+    "valid_range": patch_valid_range,
+    "mask_night": patch_mask_night,
     "rolling_operation": patch_rolling_operation,
     "subset_dataset": patch_subset_dataset,
 }
@@ -294,6 +504,9 @@ def patch_dataset(ds: xr.Dataset, patch: dict[str, dict[str, Any]]) -> Any:
         "sort_coordinates",
         "subset_dataset",
         "analysis_lead_to_valid_time",
+        "vector_magnitude",
+        "valid_range",
+        "mask_night",
         "rolling_operation",
     ]
     for what, values in sorted(patch.items(), key=lambda x: ORDER.index(x[0])):
