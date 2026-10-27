@@ -1,0 +1,1022 @@
+name: dmi-danra-deode-harmonie-trajectories-2p5km-1990-2023-3h-v1
+description: >-
+  DANRA as an Anemoi *trajectories* dataset for DEODE. Each sample is a forecast
+  trajectory: step 0 is the DANRA analysis, steps 1-3h are the corresponding
+  DANRA short forecast (the PT3H files). Accumulations (precipitation and
+  radiation) and the maximum gust (10fg) are over the past 1, 3 and 6 hours,
+  named {param}_1hr, {param}_3hr and {param}_6hr, and al is the latest daylight
+  albedo; these are read by validity time so that step 0 is covered by the
+  previous cycles.
+attribution: DMI
+licence: CC-BY-4.0
+
+# A trajectories recipe replaces `dates:` with `base_dates:` (the model-run
+# times) plus `steps:` (the forecast lead times). The samples written to disk
+# are the Cartesian product of the two, so the array is 5-D:
+#   (base_dates, variables, ensembles, steps, cells)
+#
+# base_dates matches the 3-hourly analysis_time axis of the DANRA stores.
+#
+# 1990-09-01T06:00 is the earliest base date that works, and it is a hard
+# floor, not a rounding. The forecast files begin at analysis_time
+# 1990-09-01T00:00 with lead times of 1-3h, so the flattened validity-time axis
+# starts at 01:00 -- step 0 of an earlier base date would ask for a field that
+# does not exist, and the build fails with "does not match number of available
+# fields" rather than producing a NaN. On top of that the 3- and 6-hour
+# accumulations and maximum gusts need three or six hourly values behind
+# them, so the *_3hr variables are NaN until 03:00 and the *_6hr ones until
+# 06:00. al is NaN until the sun first rises.
+base_dates:
+  # start: 1990-09-01 00:00:00
+  # end: 2023-12-31 21:00:00
+  start: 1990-09-01 00:00:00
+  end: 1990-09-04 00:00:00
+  frequency: 3h
+  missing:
+    - 1990-09-01 00:00:00
+
+
+# forecast_period in the PT3H files is [1h, 2h, 3h]; step 0 is the analysis.
+steps:
+  start: 0
+  end: 3
+  frequency: 1h
+
+definitions:
+  # Shared by every store: the DANRA grid.
+  grid_rules: &grid_rules
+    latitude:
+      name: lat
+    longitude:
+      name: lon
+    x:
+      name: x
+    y:
+      name: y
+
+  # `valid_time` is a 2-D (analysis_time, forecast_period) coordinate. It is
+  # redundant -- analysis_time and forecast_period already determine it -- and
+  # the coordinate guesser cannot handle a 2-D time coordinate, so drop it at
+  # open time with xarray's own `drop_variables`.
+  zarr_options: &zarr_options
+    chunks: {}
+    drop_variables:
+      - valid_time
+
+  # Analysis stores are indexed by validity time only.
+  analysis_time_rule: &analysis_time_rule
+    time:
+      name: time
+
+  # Forecast stores are indexed by run time and lead time. Mapping them to the
+  # `date` and `step` roles is what makes the store a *forecast* to Anemoi: each
+  # field is then identified by (run, step) rather than by validity time alone,
+  # which is exactly what the trajectories layout asks for.
+  forecast_time_rules: &forecast_time_rules
+    date:
+      name: analysis_time
+    step:
+      name: forecast_period
+
+  preload: &preload
+    128GiB
+
+  # The DE330 common list (datasets_to_be_used_in_DE33014.md) asks for the 13
+  # ERA5 levels 50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925 and
+  # 1000 hPa. DANRA has no 50 or 150 hPa, so these are the other 11, plus 800
+  # hPa, which every regional dataset in the list has. DANRA's 900 and 950 hPa
+  # are left out.
+  pressure_levels: &pressure_levels
+    - 100
+    - 200
+    - 250
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 850
+    - 925
+    - 1000
+
+input:
+  join:
+    # ------------------------------------------------------------------
+    # Pressure levels: t, u, v, w, z, q, clwc, ciwc
+    # step 0 from the analysis, steps 1-3 from the matching forecast run.
+    # ------------------------------------------------------------------
+    - pipe:
+        - concat:
+            - steps:
+                start: 0
+                end: 0
+                frequency: 1h
+              xarray-zarr:
+                url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/pressure_levels_analysis.zarr
+                options: *zarr_options
+                preload: *preload
+                param:
+                  - r # needed for q
+                  - t
+                  - u
+                  - v
+                  - w
+                  - z
+                  - clwc
+                  - ciwc
+                pressure: *pressure_levels
+                flavour:
+                  rules:
+                    <<: [*grid_rules, *analysis_time_rule]
+                    level:
+                      name: pressure
+                  levtype: pl
+                patch:
+                  rename:
+                    tw: w
+                    cwat: clwc
+                  # The stores hold pressure descending (1000 -> 100).
+                  sort_coordinates:
+                    - pressure
+
+            - steps:
+                start: 1
+                end: 3
+                frequency: 1h
+              xarray-zarr:
+                url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/pressure_levels_forecast_PT3H.zarr
+                options: *zarr_options
+                preload: *preload
+                param:
+                  - r # needed for q
+                  - t
+                  - u
+                  - v
+                  - w
+                  - z
+                  - clwc
+                  - ciwc
+                pressure: *pressure_levels
+                flavour:
+                  rules:
+                    <<: [*grid_rules, *forecast_time_rules]
+                    level:
+                      name: pressure
+                  levtype: pl
+                patch:
+                  rename:
+                    tw: w
+                    cwat: clwc
+                  sort_coordinates:
+                    - pressure
+
+        # DANRA stores relative humidity as a fraction (units "1", 0-1), but
+        # earthkit-meteo -- which r-to-q calls -- documents its `r` argument as
+        # a percentage. Without this the humidity comes out 100x too small
+        # (q ~ 1e-5 instead of ~1e-2 kg/kg).
+        #
+        # `convert` rather than `rescale`: both scale by 100 here, but convert
+        # also labels the result, whereas rescale leaves the units unset -- and
+        # r-to-q builds q from the *humidity* field, so q would inherit that
+        # missing unit.
+        - convert:
+            param: r
+            unit_in: "1"
+            unit_out: "%"
+
+        - r-to-q:
+            relative_humidity: r
+            temperature: t
+            humidity: q
+            # Naming only the inputs to keep: r is dropped, t kept, q added.
+            # (The output, q, is always returned.)
+            return_inputs:
+              - temperature
+
+        # q is built from the humidity field, so it inherits r's units ("%").
+        # Relabel it; unit_in == unit_out, so the values are untouched.
+        - convert:
+            param: q
+            unit_in: kg/kg
+            unit_out: kg/kg
+
+    # ------------------------------------------------------------------
+    # Single levels, instantaneous:
+    # 10u, 10v, 2t, 2d, skt, msl, sp, tcw, z0, swv, st, tcc, lcc, mcc, hcc,
+    # sd, cape
+    # step 0 from the analysis, steps 1-3 from the matching forecast run.
+    # ------------------------------------------------------------------
+    - pipe:
+        - concat:
+            - steps:
+                start: 0
+                end: 0
+                frequency: 1h
+              xarray-zarr:
+                url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_analysis.zarr
+                options: *zarr_options
+                preload: *preload
+                # Names below are the *renamed* ones: `patch.rename` runs before
+                # the fields are selected.
+                param: &single_level_params
+                  - 10u
+                  - 10v
+                  - r2m # needed for 2d
+                  - 2t
+                  - skt
+                  - msl
+                  - sp
+                  - tcw
+                  - z0
+                  - soil_moisture # needed for swv
+                  - soil_ice # needed for swv
+                  - st
+                  - tcc
+                  - lcc
+                  - mcc
+                  - hcc
+                  - sd
+                  - cape
+                flavour:
+                  rules:
+                    <<: [*grid_rules, *analysis_time_rule]
+                  levtype: sfc
+                patch:
+                  # tcw is total column water *vapour* (precipitable water).
+                  # ERA5's tcw also counts cloud water, ice, rain and snow, but
+                  # DANRA's GRIB holds no column of any of them except graupel;
+                  # the cloud condensate would add only ~0.1-0.25% on average.
+                  #
+                  # swv is the total (liquid + frozen) water of ISBA's root-zone soil
+                  # layer, the layer st is the temperature of; see the sum below.
+                  #
+                  # st is ISBA's soil temperature, the mean over the same root zone. The only
+                  # other one, t_surface_isba, is the surface itself: over land it follows
+                  # t0m with no lag, so it would all but duplicate skt.
+                  #
+                  # cape is a most-unstable CAPE, like ERA5's: it follows CAPE
+                  # lifted from the most unstable level in the lowest ~300 hPa
+                  # (correlation 0.92-0.95 on convective days), and stays up at
+                  # night where only elevated parcels are unstable. It does not
+                  # lift a 2 m parcel, which the DE330 Extreme DT's mucape also
+                  # does, so it can be the smaller of the two on sunny
+                  # afternoons.
+                  rename: &single_level_renames
+                    u10m: 10u
+                    v10m: 10v
+                    t2m: 2t
+                    t0m: skt
+                    pres_seasurface: msl
+                    pres0m: sp
+                    pwat_column: tcw
+                    roughness_length: z0
+                    soil_temperature: st
+                    snow_water_equivalent: sd
+                    cape_column: cape
+
+            - steps:
+                start: 1
+                end: 3
+                frequency: 1h
+              xarray-zarr:
+                url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+                options: *zarr_options
+                preload: *preload
+                param: *single_level_params
+                flavour:
+                  rules:
+                    <<: [*grid_rules, *forecast_time_rules]
+                  levtype: sfc
+                patch:
+                  rename: *single_level_renames
+
+        # Same fraction-vs-percent correction as for the pressure levels.
+        - convert:
+            param: r2m
+            unit_in: "1"
+            unit_out: "%"
+
+        - r-to-d:
+            relative_humidity: r2m
+            temperature: 2t
+            dewpoint: 2d
+            # r2m is dropped, 2t kept, 2d added.
+            return_inputs:
+              - temperature
+
+        # 2d inherits r2m's units for the same reason; relabel it too.
+        - convert:
+            param: 2d
+            unit_in: K
+            unit_out: K
+
+        # swv: liquid plus frozen volumetric water of the root-zone soil layer,
+        # as ERA5's swvl1 counts both. The two cover the same layer; the root
+        # zone's lower bound is the rooting depth, so it varies with the
+        # vegetation. (The thin superficial layer has liquid water only.)
+        - sum:
+            params:
+              - soil_moisture
+              - soil_ice
+            output: swv
+
+        # sd in metres of water equivalent, as ERA5's sd, from kg m-2.
+        - rescale:
+            param: sd
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: sd
+            unit_in: m
+            unit_out: m
+
+    # ------------------------------------------------------------------
+    # 100u, 100v
+    # step 0 from the analysis, steps 1-3 from the matching forecast run.
+    #
+    # Selecting the one height drops the height dimension, so these are
+    # single-level fields and are named as renamed, rather than u_100 and
+    # v_100 -- which would collide with the 100 hPa winds.
+    # ------------------------------------------------------------------
+    - concat:
+        - steps:
+            start: 0
+            end: 0
+            frequency: 1h
+          xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/height_levels_analysis.zarr
+            options: *zarr_options
+            preload: *preload
+            param: &height_level_params
+              - 100u
+              - 100v
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch: &height_level_patch
+              rename:
+                u: 100u
+                v: 100v
+              subset_dataset:
+                height: 100
+
+        - steps:
+            start: 1
+            end: 3
+            frequency: 1h
+          xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/height_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param: *height_level_params
+            flavour:
+              rules:
+                <<: [*grid_rules, *forecast_time_rules]
+              levtype: sfc
+            patch: *height_level_patch
+
+    # ------------------------------------------------------------------
+    # Accumulations over the past 1, 3 and 6 hours, named {param}_1hr,
+    # {param}_3hr and {param}_6hr: tp, sf, ssrd, strd, ssr, str, tirf, tsnowp
+    # and tgrp.
+    #
+    # These only exist in the forecast files, which have no step 0. Rather than
+    # leaving step 0 empty, the store is flattened onto a validity-time axis
+    # (`analysis_lead_to_valid_time`) and read by validity time, so every step
+    # -- including 0 -- is served: step 0 takes the hours ending at the base
+    # date, which come from the previous cycles. The flattened axis is
+    # contiguous hourly, because the 3-hourly run spacing is exactly covered by
+    # the three hourly lead times, so a rolling sum of 3 or 6 of its values is
+    # the 3- or 6-hour accumulation. The 1-hour values are the store's own.
+    #
+    # Each window is its own source, since a source renames each store
+    # variable to one name and applies one rolling operation. Patches run in
+    # a fixed order -- rename, analysis_lead_to_valid_time, rolling_operation
+    # -- so the rolling operation names the variables as renamed.
+    #
+    # The store's radiation fields are time integrals over the hour (W s m-2 =
+    # J m-2), like ERA5's. ssrd is the global (direct + diffuse) downward
+    # shortwave, grad; strd the downward longwave, the *accumulated* lwavr --
+    # the instantaneous lwavr, like swavr, is a net flux. ssr and str are the
+    # net radiation, nswrs and nlwrs, positive downward as in ERA5. They are
+    # labelled J m**-2, as ERA5 does; the values are untouched.
+    #
+    # tp is exactly tirf + tsnowp + tgrp (rain, snow and graupel), and is in
+    # metres of water, as ERA5, AIFS and the DE330 variable list have it, from
+    # kg m-2 (mm): `rescale` leaves the units unset, so `convert` (m -> m,
+    # values untouched) labels them. tirf, tsnowp and tgrp stay in kg m-2, the
+    # units of those GRIB parameters (and ARRA's).
+    #
+    # sf is all frozen precipitation, snow and graupel, in metres of water as
+    # in ERA5: the IFS has no graupel, so its snowfall includes what HARMONIE
+    # calls graupel. It has its own sources, as the `sum` filter consumes its
+    # inputs, which are also wanted as tsnowp and tgrp.
+    #
+    # The hourly accumulations go very slightly negative at a few percent of
+    # points -- float noise from differencing the model's running totals
+    # (tp_accum_past_hr down to -8e-4 kg m-2) -- and so do some sums of them.
+    # Those that cannot physically be negative are clipped to 0. ssr is net
+    # shortwave, (1 - albedo) times the downward flux, so it cannot be
+    # negative either; str, net longwave, can be and is left.
+    # ------------------------------------------------------------------
+    # 1-hour accumulations.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - tp_1hr
+              - ssrd_1hr
+              - strd_1hr
+              - ssr_1hr
+              - str_1hr
+              - tirf_1hr
+              - tsnowp_1hr
+              - tgrp_1hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                tp_accum_past_hr: tp_1hr
+                grad_accum_past_hr: ssrd_1hr
+                lwavr_accum_past_hr: strd_1hr
+                nswrs_accum_past_hr: ssr_1hr
+                nlwrs_accum_past_hr: str_1hr
+                rain_accum_past_hr: tirf_1hr
+                snow_accum_past_hr: tsnowp_1hr
+                grpl_accum_past_hr: tgrp_1hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+        - rescale:
+            param: tp_1hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: tp_1hr
+            unit_in: m
+            unit_out: m
+        - convert:
+            param: ssrd_1hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: strd_1hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: ssr_1hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: str_1hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - clip:
+            param: tp_1hr
+            minimum: 0
+        - clip:
+            param: tirf_1hr
+            minimum: 0
+        - clip:
+            param: tsnowp_1hr
+            minimum: 0
+        - clip:
+            param: tgrp_1hr
+            minimum: 0
+        - clip:
+            param: ssrd_1hr
+            minimum: 0
+        - clip:
+            param: strd_1hr
+            minimum: 0
+        - clip:
+            param: ssr_1hr
+            minimum: 0
+
+    # 1-hour sf.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - snow_1hr
+              - grpl_1hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                snow_accum_past_hr: snow_1hr
+                grpl_accum_past_hr: grpl_1hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+        - sum:
+            params:
+              - snow_1hr
+              - grpl_1hr
+            output: sf_1hr
+        - rescale:
+            param: sf_1hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: sf_1hr
+            unit_in: m
+            unit_out: m
+        - clip:
+            param: sf_1hr
+            minimum: 0
+
+    # 3-hour accumulations.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - tp_3hr
+              - ssrd_3hr
+              - strd_3hr
+              - ssr_3hr
+              - str_3hr
+              - tirf_3hr
+              - tsnowp_3hr
+              - tgrp_3hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                tp_accum_past_hr: tp_3hr
+                grad_accum_past_hr: ssrd_3hr
+                lwavr_accum_past_hr: strd_3hr
+                nswrs_accum_past_hr: ssr_3hr
+                nlwrs_accum_past_hr: str_3hr
+                rain_accum_past_hr: tirf_3hr
+                snow_accum_past_hr: tsnowp_3hr
+                grpl_accum_past_hr: tgrp_3hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+              rolling_operation:
+                dim: time
+                steps: 3
+                operation: sum
+                vars:
+                  - tp_3hr
+                  - ssrd_3hr
+                  - strd_3hr
+                  - ssr_3hr
+                  - str_3hr
+                  - tirf_3hr
+                  - tsnowp_3hr
+                  - tgrp_3hr
+        - rescale:
+            param: tp_3hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: tp_3hr
+            unit_in: m
+            unit_out: m
+        - convert:
+            param: ssrd_3hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: strd_3hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: ssr_3hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: str_3hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - clip:
+            param: tp_3hr
+            minimum: 0
+        - clip:
+            param: tirf_3hr
+            minimum: 0
+        - clip:
+            param: tsnowp_3hr
+            minimum: 0
+        - clip:
+            param: tgrp_3hr
+            minimum: 0
+        - clip:
+            param: ssrd_3hr
+            minimum: 0
+        - clip:
+            param: strd_3hr
+            minimum: 0
+        - clip:
+            param: ssr_3hr
+            minimum: 0
+
+    # 3-hour sf.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - snow_3hr
+              - grpl_3hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                snow_accum_past_hr: snow_3hr
+                grpl_accum_past_hr: grpl_3hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+              rolling_operation:
+                dim: time
+                steps: 3
+                operation: sum
+                vars:
+                  - snow_3hr
+                  - grpl_3hr
+        - sum:
+            params:
+              - snow_3hr
+              - grpl_3hr
+            output: sf_3hr
+        - rescale:
+            param: sf_3hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: sf_3hr
+            unit_in: m
+            unit_out: m
+        - clip:
+            param: sf_3hr
+            minimum: 0
+
+    # 6-hour accumulations.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - tp_6hr
+              - ssrd_6hr
+              - strd_6hr
+              - ssr_6hr
+              - str_6hr
+              - tirf_6hr
+              - tsnowp_6hr
+              - tgrp_6hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                tp_accum_past_hr: tp_6hr
+                grad_accum_past_hr: ssrd_6hr
+                lwavr_accum_past_hr: strd_6hr
+                nswrs_accum_past_hr: ssr_6hr
+                nlwrs_accum_past_hr: str_6hr
+                rain_accum_past_hr: tirf_6hr
+                snow_accum_past_hr: tsnowp_6hr
+                grpl_accum_past_hr: tgrp_6hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+              rolling_operation:
+                dim: time
+                steps: 6
+                operation: sum
+                vars:
+                  - tp_6hr
+                  - ssrd_6hr
+                  - strd_6hr
+                  - ssr_6hr
+                  - str_6hr
+                  - tirf_6hr
+                  - tsnowp_6hr
+                  - tgrp_6hr
+        - rescale:
+            param: tp_6hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: tp_6hr
+            unit_in: m
+            unit_out: m
+        - convert:
+            param: ssrd_6hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: strd_6hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: ssr_6hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - convert:
+            param: str_6hr
+            unit_in: W s m**-2
+            unit_out: J m**-2
+        - clip:
+            param: tp_6hr
+            minimum: 0
+        - clip:
+            param: tirf_6hr
+            minimum: 0
+        - clip:
+            param: tsnowp_6hr
+            minimum: 0
+        - clip:
+            param: tgrp_6hr
+            minimum: 0
+        - clip:
+            param: ssrd_6hr
+            minimum: 0
+        - clip:
+            param: strd_6hr
+            minimum: 0
+        - clip:
+            param: ssr_6hr
+            minimum: 0
+
+    # 6-hour sf.
+    - pipe:
+        - xarray-zarr:
+            url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+            options: *zarr_options
+            preload: *preload
+            param:
+              - snow_6hr
+              - grpl_6hr
+            flavour:
+              rules:
+                <<: [*grid_rules, *analysis_time_rule]
+              levtype: sfc
+            patch:
+              rename:
+                snow_accum_past_hr: snow_6hr
+                grpl_accum_past_hr: grpl_6hr
+              analysis_lead_to_valid_time:
+                analysis_time_coordinate: analysis_time
+                lead_time_coordinate: forecast_period
+                valid_time_coordinate: time
+              rolling_operation:
+                dim: time
+                steps: 6
+                operation: sum
+                vars:
+                  - snow_6hr
+                  - grpl_6hr
+        - sum:
+            params:
+              - snow_6hr
+              - grpl_6hr
+            output: sf_6hr
+        - rescale:
+            param: sf_6hr
+            scale: 0.001
+            offset: 0
+        - convert:
+            param: sf_6hr
+            unit_in: m
+            unit_out: m
+        - clip:
+            param: sf_6hr
+            minimum: 0
+
+    # ------------------------------------------------------------------
+    # 10fg_1hr, 10fg_3hr, 10fg_6hr
+    #
+    # The maximum gust over the past 1, 3 and 6 hours, the windows of the
+    # accumulations, read by validity time like them. The store has the
+    # gust's u and v components, each the maximum over the past hour; the
+    # speed is computed first and its maximum taken after, as the maximum of
+    # each component would overstate the gust. The 1-hour value is the speed
+    # of the store's own hourly maxima.
+    # ------------------------------------------------------------------
+    - xarray-zarr:
+        url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+        options: *zarr_options
+        preload: *preload
+        param:
+          - 10fg_1hr
+        flavour:
+          rules:
+            <<: [*grid_rules, *analysis_time_rule]
+          levtype: sfc
+        patch:
+          analysis_lead_to_valid_time:
+            analysis_time_coordinate: analysis_time
+            lead_time_coordinate: forecast_period
+            valid_time_coordinate: time
+          vector_magnitude:
+            10fg_1hr:
+              - ugst10m_past_hr
+              - vgst10m_past_hr
+
+    - xarray-zarr:
+        url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+        options: *zarr_options
+        preload: *preload
+        param:
+          - 10fg_3hr
+        flavour:
+          rules:
+            <<: [*grid_rules, *analysis_time_rule]
+          levtype: sfc
+        patch:
+          analysis_lead_to_valid_time:
+            analysis_time_coordinate: analysis_time
+            lead_time_coordinate: forecast_period
+            valid_time_coordinate: time
+          vector_magnitude:
+            10fg_3hr:
+              - ugst10m_past_hr
+              - vgst10m_past_hr
+          rolling_operation:
+            dim: time
+            steps: 3
+            operation: max
+            vars:
+              - 10fg_3hr
+
+    - xarray-zarr:
+        url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+        options: *zarr_options
+        preload: *preload
+        param:
+          - 10fg_6hr
+        flavour:
+          rules:
+            <<: [*grid_rules, *analysis_time_rule]
+          levtype: sfc
+        patch:
+          analysis_lead_to_valid_time:
+            analysis_time_coordinate: analysis_time
+            lead_time_coordinate: forecast_period
+            valid_time_coordinate: time
+          vector_magnitude:
+            10fg_6hr:
+              - ugst10m_past_hr
+              - vgst10m_past_hr
+          rolling_operation:
+            dim: time
+            steps: 6
+            operation: max
+            vars:
+              - 10fg_6hr
+
+    # ------------------------------------------------------------------
+    # al
+    #
+    # DANRA's albedo is only a valid albedo while the sun is up. Once it sets
+    # the field drops by ~0.13-0.16 and goes negative at about half the land
+    # points, down to -250, in the analysis and the forecasts alike; the switch
+    # is exactly at the horizon. So al is the latest daylight value: values
+    # with the sun below 1.15 degrees (cos zenith 0.02; right at the horizon a
+    # few percent are still bad) are masked, and the latest remaining value in
+    # the past 24 hours is taken. Through the night that is the last value
+    # before sunset. 24 hours covers the longest night in the domain, ~20 hours
+    # at its northern edge in December.
+    #
+    # In daylight a few hundred land points (~0.15 %) are negative too, down
+    # to about -1, on snow-free high ground, mostly in the Scandinavian
+    # mountains in summer and autumn. Those are masked as well (valid_range,
+    # applied before the rolling operation), so they keep their latest valid
+    # value instead.
+    #
+    # Read by validity time from the flattened forecast store, like the
+    # accumulations above, so every step -- including 0 -- is the latest
+    # daylight value at that step. It is NaN until the first daylight hour,
+    # 1990-09-01 ~04 UTC. Sea points are NaN throughout (SURFEX land field).
+    # ------------------------------------------------------------------
+    - xarray-zarr:
+        url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_forecast_PT3H.zarr
+        options: *zarr_options
+        preload: *preload
+        param:
+          - al
+        flavour:
+          rules:
+            <<: [*grid_rules, *analysis_time_rule]
+          levtype: sfc
+        patch:
+          rename:
+            albedo: al
+          analysis_lead_to_valid_time:
+            analysis_time_coordinate: analysis_time
+            lead_time_coordinate: forecast_period
+            valid_time_coordinate: time
+          valid_range:
+            vars:
+              - al
+            minimum: 0
+          mask_night:
+            vars:
+              - al
+            latitude: lat
+            longitude: lon
+            min_cos_solar_zenith_angle: 0.02
+          rolling_operation:
+            dim: time
+            steps: 24
+            operation: last
+            vars:
+              - al
+
+    # ------------------------------------------------------------------
+    # Constants: lsm, z
+    #
+    # These have no time dimension, so they are valid for every
+    # (base date, step) pair and are broadcast automatically. No
+    # `repeated_dates` needed -- which is just as well, since that source is
+    # not trajectory-aware.
+    # ------------------------------------------------------------------
+    - xarray-zarr:
+        url: /dmidata/projects/cloudphysics/danra/data/v0.6.1/single_levels_analysis.zarr
+        options: *zarr_options
+        preload: *preload
+        param:
+          - lsm
+          - z
+        flavour:
+          rules:
+            <<: [*grid_rules, *analysis_time_rule]
+          levtype: sfc
+        patch:
+          rename:
+            surface_geopotential: z
+
+    # ------------------------------------------------------------------
+    # Forcings, computed on the DANRA grid at each step's validity time: the
+    # same set as AIFS and MET Norway's Bris. The template, the constants
+    # above, is only used for its grid.
+    # ------------------------------------------------------------------
+    - forcings:
+        template: ${input.join.13.xarray-zarr}
+        param:
+          - cos_latitude
+          - sin_latitude
+          - cos_longitude
+          - sin_longitude
+          - cos_julian_day
+          - sin_julian_day
+          - cos_local_time
+          - sin_local_time
+          - insolation
+
+output:
+  layout: trajectories
+
+build:
+  # Dates per build group. Each group preloads its window of the source stores
+  # once (see `preload` above), so this is the speed/memory dial: the saving
+  # grows with the group, and so does the memory a worker needs. The
+  # trajectories default is 1, which would leave nothing to amortise beyond the
+  # steps of a single trajectory.
+  #
+  # At 8 base dates a worker peaks near 80 GB with the variables here (it
+  # was ~55 GB with the 88 of the DE330 list alone), and the peak grows with
+  # the group. That is *per worker*, so budget it against the number of
+  # `--parts` jobs you run on a node, not against the node's total memory.
+  group_by: 16
+  # Surface z stays `z`; pressure-level z becomes z_100 ... z_1000.
+  variable_naming: "{param}_{pressure}"
+  allow_nans: true
+
+# Build it incrementally so a restart does not lose the whole run:
+#
+#   anemoi-datasets init     danra_anemoi_trajectories.yaml <name>.zarr --overwrite
+#   anemoi-datasets load     <name>.zarr --parts 1/200      # repeat / parallelise
+#   anemoi-datasets finalise <name>.zarr
+#
+# `anemoi-datasets inspect <name>.zarr` shows progress; `cleanup` removes
+# leftover temporary files.
